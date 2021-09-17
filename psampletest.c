@@ -494,15 +494,22 @@ extern "C" {
       fprintf(stderr, "must be ROOT to run this program\n");
       exit(-1);
     }
+
+    // make sure psample kernel module is loaded
+    int modprobe_status = system("modprobe psample");
+    printf("modprobe psample returned %d\n", modprobe_status);
+
+
+    // open generic netlinke socket
     pst->id = 0;
     pst->nl_sock = UTNLGeneric_open(pst->id);
     if(pst->nl_sock < 0) {
       printf("pstest: myNLGeneric_open failed : %s\n", strerror(errno));
       exit(-1);
     }
-
     printf("pstest: netlink socket number = %u\n", UTNLGeneric_pid(pst->id));
-    // kick off with the family lookup request
+
+    // family lookup
     getFamily_PSAMPLE(pst);
     // wait some number of mS for answer
     socketRead(pst, 500, readNetlink_PSAMPLE);
@@ -510,12 +517,12 @@ extern "C" {
       printf("failed to get PSAMPLE family id\n");
       exit(-1);
     }
-    
+
     // join multicast group TODO: is this necessary?
     joinGroup_PSAMPLE(pst);
     send_test_msg(pst);
     // read loop
     for(;;) {
-      socketRead(pst, 1000, readNetlink_PSAMPLE);
+      socketRead(pst, 500, readNetlink_PSAMPLE);
     }
   }
