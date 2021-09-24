@@ -26,6 +26,7 @@ extern "C" {
 #include <linux/psample.h>
 #include <net/if.h>
 #include <signal.h>
+#include <ctype.h>
 
 #ifndef SOL_NETLINK
 #define SOL_NETLINK 270
@@ -33,7 +34,11 @@ extern "C" {
 #define PST_PSAMPLE_READNL_RCV_BUF 8192
 #define PST_PSAMPLE_READNL_BATCH 100
 #define PST_PSAMPLE_RCVBUF 8000000
-
+  
+  typedef uint32_t bool;
+#define YES ((bool)1)
+#define NO ((bool)0)
+  
   // Shadow the attributes in linux/psample.h so
   // we can easily compile/test fields that are not
   // defined on the kernel we are compiling on.
@@ -59,7 +64,7 @@ extern "C" {
     PST_PSAMPLE_ATTR_PROTO,/* u16 */
 
     __PST_PSAMPLE_ATTR_MAX
-  } EnumHSPPsampleAttributes;
+  } EnumPSTAttributes;
   
   typedef struct _PST {
     uint32_t id;
@@ -68,10 +73,112 @@ extern "C" {
     uint32_t genetlink_version;
     uint16_t family_id;
     uint32_t group_id;
-    // psample channel groups
-    uint32_t grp_ingress;
-    uint32_t grp_egress;
+    uint32_t psgrp_ingress;
+    uint32_t psgrp_egress;
   } PST;
+
+  typedef struct _PSAttr {
+    bool included:1;
+    bool onheap:1;
+    struct nlattr attr;
+    struct iovec val;
+    uint64_t buf64;
+  } PSAttr;
+    
+  typedef struct _PSSpec {
+    struct nlmsghdr nlh;
+    struct genlmsghdr ge;
+    PSAttr attr[__PST_PSAMPLE_ATTR_MAX];
+    int n_attrs;
+    int attrs_len;
+  } PSSpec;
+
+
+  /*_________________---------------------------__________________
+    _________________        logging            __________________
+    -----------------___________________________------------------
+  */
+
+#define LOGPREFIX "pstest: "
+
+  void myLogv(char *fmt, va_list args) {
+    fprintf(stdout, LOGPREFIX);
+    vfprintf(stdout, fmt, args);
+  }
+
+  void myLog(char *fmt, ...)
+  {
+    va_list args;
+    va_start(args, fmt);
+    myLogv(fmt, args);
+  }
+
+  /*________________---------------------------__________________
+    ________________     hex2bin, bin2hex      __________________
+    ----------------___________________________------------------
+  */
+
+  static u_char hex2bin(u_char c)
+  {
+    return (isdigit(c) ? (c)-'0': ((toupper(c))-'A')+10)  & 0xf;
+  }
+
+  static u_char bin2hex(int nib)
+  {
+    return (nib < 10) ? ('0' + nib) : ('A' - 10 + nib);
+  }
+
+  /*_________________---------------------------__________________
+    _________________   printHex, hexToBinary   __________________
+    -----------------___________________________------------------
+  */
+
+  int printHex(const u_char *a, int len, u_char *buf, int bufLen, int prefix)
+  {
+    int b = 0;
+    if(prefix) {
+      buf[b++] = '0';
+      buf[b++] = 'x';
+    }
+    for(int i = 0; i < len; i++) {
+      if(b > (bufLen - 2)) return 0; // must be room for 2 characters
+      u_char byte = a[i];
+      buf[b++] = bin2hex(byte >> 4);
+      buf[b++] = bin2hex(byte & 0x0f);
+    }
+
+    // add NUL termination
+    buf[b] = '\0';
+
+    return b;
+  }
+
+  int hexToBinary(u_char *hex, u_char *bin, uint32_t binLen)
+  {
+    // read from hex into bin, up to max binLen chars, return number written
+    u_char *h = hex;
+    u_char *b = bin;
+    u_char c;
+    uint32_t i = 0;
+
+    while((c = *h++) != '\0') {
+      if(isxdigit(c)) {
+	u_char val = hex2bin(c);
+	if(isxdigit(*h)) {
+	  c = *h++;
+	  val = (val << 4) | hex2bin(c);
+	}
+	*b++ = val;
+	if(++i >= binLen) return i;
+      }
+      else if(c != '.' &&
+	      c != '-' &&
+	      c != ':') { // allow a variety of byte-separators
+	return i;
+      }
+    }
+    return i;
+  }
 
   /*_________________---------------------------__________________
     _________________       fcntl utils         __________________
@@ -82,7 +189,7 @@ extern "C" {
     int fdFlags = fcntl(fd, F_GETFL);
     fdFlags |= O_NONBLOCK;
     if(fcntl(fd, F_SETFL, fdFlags) < 0) {
-      printf("fcntl(O_NONBLOCK) failed: %s\n", strerror(errno));
+      myLog("fcntl(O_NONBLOCK) failed: %s\n", strerror(errno));
     }
   }
 
@@ -91,7 +198,7 @@ extern "C" {
     int fdFlags = fcntl(fd, F_GETFD);
     fdFlags |= FD_CLOEXEC;
     if(fcntl(fd, F_SETFD, fdFlags) < 0) {
-      printf("fcntl(F_SETFD=FD_CLOEXEC) failed: %s\n", strerror(errno));
+      myLog("fcntl(F_SETFD=FD_CLOEXEC) failed: %s\n", strerror(errno));
     }
   }
 
@@ -114,7 +221,7 @@ extern "C" {
   int UTNLGeneric_open(uint32_t mod_id) {
     int nl_sock = socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC);
     if(nl_sock < 0) {
-      printf("nl_sock open failed: %s\n", strerror(errno));
+      myLog("nl_sock open failed: %s\n", strerror(errno));
       return -1;
     }
 
@@ -122,7 +229,7 @@ extern "C" {
     struct sockaddr_nl sa = { .nl_family = AF_NETLINK,
 			      .nl_pid = UTNLGeneric_pid(mod_id) };
     if(bind(nl_sock, (struct sockaddr *)&sa, sizeof(sa)) < 0)
-      printf("UTNLGeneric_open: bind failed: %s\n", strerror(errno));
+      myLog("UTNLGeneric_open: bind failed: %s\n", strerror(errno));
 
     setNonBlocking(nl_sock);
     setCloseOnExec(nl_sock);
@@ -172,7 +279,7 @@ extern "C" {
 
   static void getFamily_PSAMPLE(PST *pst)
   {
-    printf("pstest: getFamily\n");
+    myLog("getFamily\n");
     UTNLGeneric_send(pst->nl_sock,
 		     pst->id,
 		     GENL_ID_CTRL,
@@ -190,14 +297,14 @@ extern "C" {
 
   static void joinGroup_PSAMPLE(PST *pst)
   {
-    printf("pstest: joinGroup %u\n", pst->group_id);
+    myLog("joinGroup %u\n", pst->group_id);
     // register for the multicast group_id
     if(setsockopt(pst->nl_sock,
 		  SOL_NETLINK,
 		  NETLINK_ADD_MEMBERSHIP,
 		  &pst->group_id,
 		  sizeof(pst->group_id)) == -1) {
-      printf("error joining PSAMPLE netlink group %u : %s\n",
+      myLog("error joining PSAMPLE netlink group %u : %s\n",
 	    pst->group_id,
 	    strerror(errno));
     }
@@ -213,13 +320,13 @@ extern "C" {
     char *msg = (char *)NLMSG_DATA(nlh);
     int msglen = nlh->nlmsg_len - NLMSG_HDRLEN;
     struct genlmsghdr *genl = (struct genlmsghdr *)msg;
-    printf("generic netlink CMD = %u\n", genl->cmd);
+    myLog("generic netlink CMD = %u\n", genl->cmd);
 
     for(int offset = GENL_HDRLEN; offset < msglen; ) {
       struct nlattr *attr = (struct nlattr *)(msg + offset);
       if(attr->nla_len == 0 ||
 	 (attr->nla_len + offset) > msglen) {
-	printf("processNetlink_GENERIC attr parse error");
+	myLog("processNetlink_GENERIC attr parse error\n");
 	break; // attr parse error
       }
       char *attr_datap = (char *)attr + NLA_HDRLEN;
@@ -229,17 +336,17 @@ extern "C" {
 	break;
       case CTRL_ATTR_FAMILY_ID:
 	pst->family_id = *(uint16_t *)attr_datap;
-	printf("generic family id: %u\n", pst->family_id); 
+	myLog("generic family id: %u\n", pst->family_id); 
 	break;
       case CTRL_ATTR_FAMILY_NAME:
-	printf("generic family name: %s\n", attr_datap); 
+	myLog("generic family name: %s\n", attr_datap); 
 	break;
       case CTRL_ATTR_MCAST_GROUPS:
 	for(int grp_offset = NLA_HDRLEN; grp_offset < attr->nla_len;) {
 	  struct nlattr *grp_attr = (struct nlattr *)(msg + offset + grp_offset);
 	  if(grp_attr->nla_len == 0 ||
 	     (grp_attr->nla_len + grp_offset) > attr->nla_len) {
-	    printf("processNetlink_GENERIC grp_attr parse error\n");
+	    myLog("processNetlink_GENERIC grp_attr parse error\n");
 	    break;
 	  }
 	  char *grp_name=NULL;
@@ -248,18 +355,18 @@ extern "C" {
 	    struct nlattr *gf_attr = (struct nlattr *)(msg + offset + grp_offset + gf_offset);
 	    if(gf_attr->nla_len == 0 ||
 	       (gf_attr->nla_len + gf_offset) > grp_attr->nla_len) {
-	      printf("processNetlink_GENERIC gf_attr parse error\n");
+	      myLog("processNetlink_GENERIC gf_attr parse error\n");
 	      break;
 	    }
 	    char *grp_attr_datap = (char *)gf_attr + NLA_HDRLEN;
 	    switch(gf_attr->nla_type) {
 	    case CTRL_ATTR_MCAST_GRP_NAME:
 	      grp_name = grp_attr_datap;
-	      printf("pstest: psample multicast group: %s\n", grp_name); 
+	      myLog("psample multicast group: %s\n", grp_name); 
 	      break;
 	    case CTRL_ATTR_MCAST_GRP_ID:
 	      grp_id = *(uint32_t *)grp_attr_datap;
-	      printf("pstest: psample multicast group id: %u\n", grp_id); 
+	      myLog("psample multicast group id: %u\n", grp_id); 
 	      break;
 	    }
 	    gf_offset += NLMSG_ALIGN(gf_attr->nla_len);
@@ -268,7 +375,7 @@ extern "C" {
 	     && grp_name
 	     && grp_id
 	     && !strcmp(grp_name, PSAMPLE_NL_MCGRP_SAMPLE_NAME)) {
-	    printf("pstest: psample found group %s=%u\n", grp_name, grp_id);
+	    myLog("psample found group %s=%u\n", grp_name, grp_id);
 	    pst->group_id = grp_id;
 	    joinGroup_PSAMPLE(pst);
 	  }
@@ -277,10 +384,10 @@ extern "C" {
 	}
 	break;
       default:
-	printf("pstest: psample attr type: %u (nested=%u) len: %u\n",
-		attr->nla_type,
-		attr->nla_type & NLA_F_NESTED,
-		attr->nla_len);
+	myLog("psample attr type: %u (nested=%u) len: %u\n",
+	      attr->nla_type,
+	      attr->nla_type & NLA_F_NESTED,
+	      attr->nla_len);
       }
       offset += NLMSG_ALIGN(attr->nla_len);
     }
@@ -297,17 +404,18 @@ extern "C" {
     u_char *msg = (u_char *)NLMSG_DATA(nlh);
     int msglen = nlh->nlmsg_len - NLMSG_HDRLEN;
     struct genlmsghdr *genl = (struct genlmsghdr *)msg;
-    printf("pstest: psample netlink (type=%u) CMD = %u\n", nlh->nlmsg_type, genl->cmd);
+    myLog("psample netlink (type=%u) CMD = %u\n", nlh->nlmsg_type, genl->cmd);
 
     uint16_t ifin=0,ifout=0;
+    u_char *pkt=NULL;
     uint32_t pkt_len=0;
+    uint32_t hdr_len=0;
     uint32_t grp_no=0;
     uint32_t grp_seq=0;
     uint32_t sample_n=0;
     uint16_t e_queue=0;
     uint64_t e_depth=0;
     uint64_t e_delay=0;
-    u_char *pkt=NULL;
 
     // TODO: tunnel encap/decap may be avaiable too
 
@@ -315,7 +423,7 @@ extern "C" {
       struct nlattr *ps_attr = (struct nlattr *)(msg + offset);
       if(ps_attr->nla_len == 0 ||
 	 (ps_attr->nla_len + offset) > msglen) {
-	printf("processNetlink_PSAMPLE attr parse error");
+	myLog("processNetlink_PSAMPLE attr parse error");
 	break;
       }
       u_char *datap = msg + offset + NLA_HDRLEN;
@@ -326,7 +434,7 @@ extern "C" {
       case PSAMPLE_ATTR_SAMPLE_GROUP: grp_no = *(uint32_t *)datap; break;
       case PSAMPLE_ATTR_GROUP_SEQ: grp_seq = *(uint32_t *)datap; break;
       case PSAMPLE_ATTR_SAMPLE_RATE: sample_n = *(uint32_t *)datap; break;
-      case PSAMPLE_ATTR_DATA: pkt = datap; break;
+      case PSAMPLE_ATTR_DATA: pkt = datap; hdr_len = ps_attr->nla_len; break;
       case PST_PSAMPLE_ATTR_OUT_TC: e_queue = *(uint16_t *)datap; break;
       case PST_PSAMPLE_ATTR_OUT_TC_OCC: e_depth = *(uint64_t *)datap; break;
       case PST_PSAMPLE_ATTR_LATENCY: e_delay = *(uint64_t *)datap; break;
@@ -334,17 +442,18 @@ extern "C" {
       offset += NLMSG_ALIGN(ps_attr->nla_len);
     }
 
-    printf("pstest: grp=%u in=%u out=%u n=%u seq=%u pktlen=%u pkt=%p q=%u depth=%"PRIu64" delay=%"PRIu64"\n",
-	    grp_no,
-	    ifin,
-	    ifout,
-	    sample_n,
-	    grp_seq,
-	    pkt_len,
-	    pkt,
-	    e_queue,
-	    e_depth,
-	    e_delay);
+    myLog("grp=%u in=%u out=%u n=%u seq=%u pktlen=%u hdrlen=%u pkt=%p q=%u depth=%"PRIu64" delay=%"PRIu64"\n",
+	  grp_no,
+	  ifin,
+	  ifout,
+	  sample_n,
+	  grp_seq,
+	  pkt_len,
+	  hdr_len,
+	  pkt,
+	  e_queue,
+	  e_depth,
+	  e_delay);
   }
 
   /*_________________---------------------------__________________
@@ -382,13 +491,13 @@ extern "C" {
 	if(nlh->nlmsg_type == NLMSG_ERROR){
 	  struct nlmsgerr *err_msg = (struct nlmsgerr *)NLMSG_DATA(nlh);
 	  if(err_msg->error == 0) {
-	    printf("received Netlink ACK");
+	    myLog("received Netlink ACK\n");
 	  }
 	  else {
 	    // TODO: parse NLMSGERR_ATTR_OFFS to get offset?  Might be helpful
-	    printf("pstest: error in netlink message: %d : %s\n",
-		    err_msg->error,
-		    strerror(-err_msg->error));
+	    myLog("error in netlink message: %d : %s\n",
+		  err_msg->error,
+		  strerror(-err_msg->error));
 	  }
 	  break;
 	}
@@ -397,40 +506,54 @@ extern "C" {
       }
     }
   }
-  
+
   /*_________________---------------------------__________________
-    _________________    send_test_msg          __________________
+    _________________    PSSpect sethdr         __________________
     -----------------___________________________------------------
   */
 
-  static void send_test_msg(PST *pst) {
-    printf("pstest: send_test_msg getuid=%d geteuid=%d\n", getuid(), geteuid());
+  static void PSSpec_sethdr(PST *pst, PSSpec *spec) {
+    spec->nlh.nlmsg_len = NLMSG_LENGTH(sizeof(spec->ge) + spec->attrs_len);
+    spec->nlh.nlmsg_flags = 0;
+    spec->nlh.nlmsg_type = pst->family_id;
+    spec->nlh.nlmsg_seq = ++pst->nl_seq;
+    spec->nlh.nlmsg_pid = UTNLGeneric_pid(pst->id);
 
-    struct nlmsghdr nlh = { };
-    struct genlmsghdr ge = { };
-    struct nlattr attr_psgid = { };
-    uint32_t psgid = pst->grp_ingress;
-    int psgid_footprint = NLMSG_ALIGN(sizeof(psgid));
-    attr_psgid.nla_len = sizeof(attr_psgid) + sizeof(psgid);
-    attr_psgid.nla_type = PSAMPLE_ATTR_SAMPLE_GROUP;
+    spec->ge.cmd = PSAMPLE_CMD_SAMPLE;
+    spec->ge.version = PSAMPLE_GENL_VERSION;
+  }
 
-    ge.cmd = PSAMPLE_CMD_SAMPLE;
-    ge.version = PSAMPLE_GENL_VERSION;
+  /*_________________---------------------------__________________
+    _________________    PSSpec_send            __________________
+    -----------------___________________________------------------
+  */
 
-    nlh.nlmsg_len = NLMSG_LENGTH(psgid_footprint + sizeof(attr_psgid) + sizeof(ge));
-    nlh.nlmsg_flags = 0;
-    nlh.nlmsg_type = pst->family_id;
-    nlh.nlmsg_seq = ++pst->nl_seq;
-    nlh.nlmsg_pid = UTNLGeneric_pid(pst->id);
+  static void PSSpec_send(PST *pst, PSSpec *spec) {
+    myLog("send_psample getuid=%d geteuid=%d\n", getuid(), geteuid());
 
-#define MY_IOV_FRAGMENTS 4
-    
-    struct iovec iov[MY_IOV_FRAGMENTS] = {
-      { .iov_base = &nlh,         .iov_len = sizeof(nlh) },
-      { .iov_base = &ge,          .iov_len = sizeof(ge) },
-      { .iov_base = &attr_psgid,  .iov_len = sizeof(attr_psgid) },
-      { .iov_base = &psgid,       .iov_len = psgid_footprint }
-    };
+#define MAX_IOV_FRAGMENTS (2 * __PST_PSAMPLE_ATTR_MAX) + 2
+
+    struct iovec iov[MAX_IOV_FRAGMENTS];
+    uint32_t frag = 0;
+    iov[frag].iov_base = &spec->nlh;
+    iov[frag].iov_len = sizeof(spec->nlh);
+    frag++;
+    iov[frag].iov_base = &spec->ge;
+    iov[frag].iov_len = sizeof(spec->ge);
+    frag++;
+    int nn = 0;
+    for(uint32_t ii = 0; ii < __PST_PSAMPLE_ATTR_MAX; ii++) {
+      PSAttr *psa = &spec->attr[ii];
+      if(psa->included) {
+	nn++;
+	iov[frag].iov_base = &psa->attr;
+	iov[frag].iov_len = sizeof(psa->attr);
+	frag++;
+	iov[frag] = psa->val; // struct copy
+	frag++;
+      }
+    }
+    assert(nn == spec->n_attrs);
 
     struct sockaddr_nl sa = { .nl_family = AF_NETLINK,
 			      .nl_groups = (1 << (pst->group_id-1)) };
@@ -438,11 +561,12 @@ extern "C" {
     struct msghdr msg = { .msg_name = &sa,
 			  .msg_namelen = sizeof(sa),
 			  .msg_iov = iov,
-			  .msg_iovlen = MY_IOV_FRAGMENTS };
+			  .msg_iovlen = frag };
 
     int status = sendmsg(pst->nl_sock, &msg, 0);
+    myLog("sendmsg returned %d\n", status);
     if(status <= 0)
-      printf("pstest: send returned %d : %s\n", status, strerror(errno));
+      myLog("strerror(errno) = %s\n", strerror(errno));
   }
 
   /*_________________---------------------------__________________
@@ -477,12 +601,152 @@ extern "C" {
       // may return prematurely if a signal was caught, in which case nfds will be
       // -1 and errno will be set to EINTR.  If we get any other error, abort.
       if(errno != EINTR) {
-	printf("pselect() returned %d : %s\n", nfds, strerror(errno));
+	myLog("pselect() returned %d : %s\n", nfds, strerror(errno));
 	abort();
       }
     }
   }
-  
+
+  /*_________________---------------------------__________________
+    _________________    PSSpec new             __________________
+    -----------------___________________________------------------
+  */
+
+  static PSSpec *PSSpec_new(PST *pst) {
+    return calloc(1, sizeof(PSSpec));
+  }
+
+  /*_________________---------------------------__________________
+    _________________    PSSpec free            __________________
+    -----------------___________________________------------------
+  */
+
+  static void PSSpec_free(PST *pst, PSSpec *spec) {
+    for(uint32_t ii = 0; ii < __PST_PSAMPLE_ATTR_MAX; ii++) {
+      PSAttr *psa = &spec->attr[ii];
+      if(psa->onheap)
+	free(psa->val.iov_base);
+    }
+    free(spec);
+  }
+
+  /*_________________---------------------------__________________
+    _________________    PSSpec serialze        __________________
+    -----------------___________________________------------------
+  */
+
+  static void my_append(char *msg, int *msglen, void *from, int len, int max_msglen) {
+    assert(((*msglen) + len) <= max_msglen);
+    memcpy((msg + *msglen), from, len);
+    *msglen += len;
+  }
+
+  static struct nlmsghdr *PSSpec_serialize(PST *pst, PSSpec *spec) {
+    // simulate the gather step in sendmsg (so we can short-circuit
+    // and test the message before sending it on the netlink channel)
+    int tot_len = sizeof(spec->nlh) + sizeof(spec->ge) + spec->attrs_len;
+    char *msg = calloc(1, tot_len);
+    int msglen = 0;
+    my_append(msg, &msglen, &spec->nlh, sizeof(spec->nlh), tot_len);
+    my_append(msg, &msglen, &spec->ge, sizeof(spec->ge), tot_len);
+    
+    int nn = 0;
+    for(uint32_t ii = 0; ii < __PST_PSAMPLE_ATTR_MAX; ii++) {
+      PSAttr *psa = &spec->attr[ii];
+      if(psa->included) {
+	nn++;
+	my_append(msg, &msglen, &psa->attr, sizeof(psa->attr), tot_len);
+	my_append(msg, &msglen, psa->val.iov_base, psa->val.iov_len, tot_len);
+      }
+    }
+    // cross-checks
+    assert(nn == spec->n_attrs);
+    assert(msglen == tot_len);
+    return (struct nlmsghdr *)msg;
+  }
+
+  /*_________________---------------------------__________________
+    _________________    PSSpec setAttr         __________________
+    -----------------___________________________------------------
+  */
+
+  static void setAttrValue(PSSpec *spec, EnumPSTAttributes type, void *val, int len) {
+    PSAttr *psa = &spec->attr[type];
+    assert(psa->included == NO); // make sure we don't set the same field twice
+    psa->included = YES;
+    psa->attr.nla_type = type;
+    psa->attr.nla_len = sizeof(psa->attr) + len;
+    int len_w_pad = NLMSG_ALIGN(len);
+    psa->val.iov_len = len_w_pad;
+    if(len_w_pad <= 8) {
+      psa->buf64 = 0;
+      psa->val.iov_base = &psa->buf64;
+    }
+    else {
+      psa->val.iov_base = calloc(1, len_w_pad);
+      psa->onheap = YES;
+    }
+    memcpy(psa->val.iov_base, val, len);
+    spec->n_attrs++;
+    spec->attrs_len += sizeof(psa->attr);
+    spec->attrs_len += len_w_pad;
+  }
+
+  static int PSSpec_setAttr(PST *pst, PSSpec *spec, EnumPSTAttributes type, char *vstr) {
+    switch(type) {
+    case PST_PSAMPLE_ATTR_IIFINDEX:
+    case PST_PSAMPLE_ATTR_OIFINDEX:
+    case PST_PSAMPLE_ATTR_ORIGSIZE:
+    case PST_PSAMPLE_ATTR_SAMPLE_GROUP:
+    case PST_PSAMPLE_ATTR_GROUP_SEQ:
+    case PST_PSAMPLE_ATTR_SAMPLE_RATE:
+      {
+	uint32_t val32 = atoi(vstr);
+	setAttrValue(spec, type, &val32, sizeof(val32));
+      }
+      break;
+
+    case PST_PSAMPLE_ATTR_DATA:
+      {
+	u_char buf[65536];
+	int len = hexToBinary((u_char *)vstr, buf, 65536);
+	setAttrValue(spec, type, buf, len);
+      }
+      break;
+
+    case PST_PSAMPLE_ATTR_TUNNEL:
+      // TODO:
+      break;
+
+    case PST_PSAMPLE_ATTR_GROUP_REFCOUNT:
+    case PST_PSAMPLE_ATTR_PAD:
+      // TODO:
+      break;
+
+    case PST_PSAMPLE_ATTR_OUT_TC:
+    case PST_PSAMPLE_ATTR_PROTO:
+      {
+	uint16_t val16 = atoi(vstr);
+	setAttrValue(spec, type, &val16, sizeof(val16));
+      }
+      // TODO: add 16-bit attr
+      break;
+
+    case PST_PSAMPLE_ATTR_OUT_TC_OCC:
+    case PST_PSAMPLE_ATTR_LATENCY:
+    case PST_PSAMPLE_ATTR_TIMESTAMP:
+      {
+	uint64_t val64 = strtoll(vstr, NULL, 0);
+	setAttrValue(spec, type, &val64, sizeof(val64));
+      }
+      break;
+    default:
+      myLog("bad attr type %d\n", type);
+      return 0;
+    }
+    return YES;
+  }
+
   /*_________________---------------------------__________________
     _________________           main            __________________
     -----------------___________________________------------------
@@ -497,32 +761,76 @@ extern "C" {
 
     // make sure psample kernel module is loaded
     int modprobe_status = system("modprobe psample");
-    printf("modprobe psample returned %d\n", modprobe_status);
+    myLog("modprobe psample returned %d\n", modprobe_status);
 
 
     // open generic netlinke socket
     pst->id = 0;
     pst->nl_sock = UTNLGeneric_open(pst->id);
     if(pst->nl_sock < 0) {
-      printf("pstest: myNLGeneric_open failed : %s\n", strerror(errno));
+      myLog("myNLGeneric_open failed : %s\n", strerror(errno));
       exit(-1);
     }
-    printf("pstest: netlink socket number = %u\n", UTNLGeneric_pid(pst->id));
+    myLog("netlink socket number = %u\n", UTNLGeneric_pid(pst->id));
 
     // family lookup
     getFamily_PSAMPLE(pst);
     // wait some number of mS for answer
     socketRead(pst, 500, readNetlink_PSAMPLE);
     if(pst->family_id == 0) {
-      printf("failed to get PSAMPLE family id\n");
+      myLog("failed to get PSAMPLE family id\n");
       exit(-1);
     }
 
-    // join multicast group TODO: is this necessary?
+    // join multicast group TODO: is this necessary
+    // if we only want to send?
     joinGroup_PSAMPLE(pst);
-    send_test_msg(pst);
+
+    // mod_psample in host-sflow expects egress to be
+    // on a psample group number that is 1 + the ingress
+    // group number.  (Note: these group numbers are
+    // attrbutes,  not to be confused with the multicast
+    // group number we are sending to.
+    //pst->psgrp_ingress = 1;
+    //pst->psgrp_egress =pst->psgrp_ingress + 1;
+    //send_test_msg(pst);
+
+    PSSpec *sample = PSSpec_new(pst);
+    PSSpec_setAttr(pst, sample, PST_PSAMPLE_ATTR_SAMPLE_GROUP, "1");
+    PSSpec_setAttr(pst, sample, PST_PSAMPLE_ATTR_IIFINDEX, "7");
+    PSSpec_setAttr(pst, sample, PST_PSAMPLE_ATTR_OIFINDEX, "9");
+    PSSpec_setAttr(pst, sample, PST_PSAMPLE_ATTR_ORIGSIZE, "1514");
+    PSSpec_setAttr(pst, sample, PST_PSAMPLE_ATTR_GROUP_SEQ, "1");
+    PSSpec_setAttr(pst, sample, PST_PSAMPLE_ATTR_SAMPLE_RATE, "1000");
+    PSSpec_setAttr(pst, sample, PST_PSAMPLE_ATTR_DATA, "080009010203080009040506080045000000000000000000000000");
+    // PST_PSAMPLE_ATTR_TUNNEL
+    // PST_PSAMPLE_ATTR_GROUP_REFCOUNT,
+    // PST_PSAMPLE_ATTR_PAD,
+    PSSpec_setAttr(pst, sample, PST_PSAMPLE_ATTR_OUT_TC, "3");
+    PSSpec_setAttr(pst, sample, PST_PSAMPLE_ATTR_OUT_TC_OCC, "33333333");
+    PSSpec_setAttr(pst, sample, PST_PSAMPLE_ATTR_LATENCY, "123456");
+    // PST_PSAMPLE_ATTR_TIMESTAMP,/* u64, nanoseconds */
+    PSSpec_setAttr(pst, sample, PST_PSAMPLE_ATTR_PROTO, "1"); // ethernet,  right?
+
+    myLog("set headers...\n");
+    PSSpec_sethdr(pst, sample);
+
+    myLog("serialize...\n");
+    struct nlmsghdr *msg = PSSpec_serialize(pst, sample);
+
+    myLog("print before sending...\n");
+    processNetlink_PSAMPLE(pst, msg);
+
+    myLog("send...\n");
+    PSSpec_send(pst, sample);
+
+    myLog("free...\n");
+    PSSpec_free(pst, sample);
+
+    myLog("start read loop...\n");
     // read loop
     for(;;) {
       socketRead(pst, 500, readNetlink_PSAMPLE);
     }
+    return 0;
   }
