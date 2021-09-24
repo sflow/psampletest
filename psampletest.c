@@ -34,6 +34,9 @@ extern "C" {
 #define PST_PSAMPLE_READNL_RCV_BUF 8192
 #define PST_PSAMPLE_READNL_BATCH 100
 #define PST_PSAMPLE_RCVBUF 8000000
+
+#define PST_SHORT_CIRCUIT_TEST 1
+#define PST_LISTEN_MODE 1
   
   typedef uint32_t bool;
 #define YES ((bool)1)
@@ -73,8 +76,6 @@ extern "C" {
     uint32_t genetlink_version;
     uint16_t family_id;
     uint32_t group_id;
-    uint32_t psgrp_ingress;
-    uint32_t psgrp_egress;
   } PST;
 
   typedef struct _PSAttr {
@@ -153,10 +154,10 @@ extern "C" {
     return b;
   }
 
-  int hexToBinary(u_char *hex, u_char *bin, uint32_t binLen)
+  int hexToBinary(char *hex, u_char *bin, uint32_t binLen)
   {
     // read from hex into bin, up to max binLen chars, return number written
-    u_char *h = hex;
+    char *h = hex;
     u_char *b = bin;
     u_char c;
     uint32_t i = 0;
@@ -508,6 +509,160 @@ extern "C" {
   }
 
   /*_________________---------------------------__________________
+    _________________    socket reading         __________________
+    -----------------___________________________------------------
+  */
+
+  typedef void (*PSTReadCB)(PST *pst, int sock);
+
+  static void socketRead(PST *pst, uint32_t select_mS, PSTReadCB readCB) {
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    sigset_t emptyset;
+    sigemptyset(&emptyset);
+    FD_SET(pst->nl_sock, &readfds);
+    int max_fd = pst->nl_sock;
+    struct timespec timeout;
+    timeout.tv_sec = 0;
+    timeout.tv_nsec = select_mS * 1000000;
+    int nfds = pselect(max_fd + 1,
+		       &readfds,
+		       (fd_set *)NULL,
+		       (fd_set *)NULL,
+		       &timeout,
+		       &emptyset);
+    // see if we got anything
+    if(nfds > 0) {
+      if(FD_ISSET(pst->nl_sock, &readfds))
+	(*readCB)(pst, pst->nl_sock);
+    }
+    else if(nfds < 0) {
+      // may return prematurely if a signal was caught, in which case nfds will be
+      // -1 and errno will be set to EINTR.  If we get any other error, abort.
+      if(errno != EINTR) {
+	myLog("pselect() returned %d : %s\n", nfds, strerror(errno));
+	abort();
+      }
+    }
+  }
+
+  /*_________________---------------------------__________________
+    _________________    PSSpec new             __________________
+    -----------------___________________________------------------
+  */
+
+  static PSSpec *PSSpec_new(PST *pst) {
+    return calloc(1, sizeof(PSSpec));
+  }
+
+  /*_________________---------------------------__________________
+    _________________    PSSpec free            __________________
+    -----------------___________________________------------------
+  */
+
+  static void PSSpec_free(PST *pst, PSSpec *spec) {
+    for(uint32_t ii = 0; ii < __PST_PSAMPLE_ATTR_MAX; ii++) {
+      PSAttr *psa = &spec->attr[ii];
+      if(psa->onheap)
+	free(psa->val.iov_base);
+    }
+    free(spec);
+  }
+
+  /*_________________---------------------------__________________
+    _________________    PSSpec setAttr         __________________
+    -----------------___________________________------------------
+  */
+
+  static void setAttrValue(PSSpec *spec, EnumPSTAttributes type, void *val, int len) {
+    PSAttr *psa = &spec->attr[type];
+    assert(psa->included == NO); // make sure we don't set the same field twice
+    psa->included = YES;
+    psa->attr.nla_type = type;
+    psa->attr.nla_len = sizeof(psa->attr) + len;
+    int len_w_pad = NLMSG_ALIGN(len);
+    psa->val.iov_len = len_w_pad;
+    if(len_w_pad <= 8) {
+      psa->buf64 = 0;
+      psa->val.iov_base = &psa->buf64;
+    }
+    else {
+      psa->val.iov_base = calloc(1, len_w_pad);
+      psa->onheap = YES;
+    }
+    memcpy(psa->val.iov_base, val, len);
+    spec->n_attrs++;
+    spec->attrs_len += sizeof(psa->attr);
+    spec->attrs_len += len_w_pad;
+  }
+
+  // break this switch up by type to help enforce expectations. Separate fns for
+  // u16, u32, u64 and binary buffer.
+
+  static bool PSSpec_setAttr16(PST *pst, PSSpec *spec, EnumPSTAttributes type, uint16_t val16) {
+    switch(type) {
+    case PST_PSAMPLE_ATTR_OUT_TC:
+    case PST_PSAMPLE_ATTR_PROTO:
+      setAttrValue(spec, type, &val16, sizeof(val16));
+      break;
+    default:
+      myLog("ERROR: type=%d does not take 16-bit integer");
+      abort();
+    }
+    return YES;
+  }
+
+  static bool PSSpec_setAttr32(PST *pst, PSSpec *spec, EnumPSTAttributes type, uint32_t val32) {
+    switch(type) {
+    case PST_PSAMPLE_ATTR_IIFINDEX:
+    case PST_PSAMPLE_ATTR_OIFINDEX:
+    case PST_PSAMPLE_ATTR_ORIGSIZE:
+    case PST_PSAMPLE_ATTR_SAMPLE_GROUP:
+    case PST_PSAMPLE_ATTR_GROUP_SEQ:
+    case PST_PSAMPLE_ATTR_SAMPLE_RATE:
+      setAttrValue(spec, type, &val32, sizeof(val32));
+      break;
+    default:
+      myLog("ERROR: type=%d does not take 32-bit integer");
+      abort();
+    }
+    return YES;
+  }
+
+  static bool PSSpec_setAttr64(PST *pst, PSSpec *spec, EnumPSTAttributes type, uint64_t val64) {
+    switch(type) {
+    case PST_PSAMPLE_ATTR_OUT_TC_OCC:
+    case PST_PSAMPLE_ATTR_LATENCY:
+    case PST_PSAMPLE_ATTR_TIMESTAMP:
+      setAttrValue(spec, type, &val64, sizeof(val64));
+      break;
+    default:
+      myLog("ERROR: type=%d does not take 64-bit integer");
+      abort();
+    }
+    return YES;
+  }
+
+  static bool PSSpec_setAttr(PST *pst, PSSpec *spec, EnumPSTAttributes type, void *buf, int len) {
+    switch(type) {
+    case PST_PSAMPLE_ATTR_DATA:
+      setAttrValue(spec, type, buf, len);
+      break;
+    case PST_PSAMPLE_ATTR_TUNNEL:
+    case PST_PSAMPLE_ATTR_GROUP_REFCOUNT:
+    case PST_PSAMPLE_ATTR_PAD:
+      // TODO: implement - but might need to move to other setAttr* fn
+      myLog("ERROR: type=%d not implemented");
+      abort();
+      break;
+    default:
+      myLog("ERROR: type=%d does not take binary buffer");
+      abort();
+    }
+    return YES;
+  }
+
+  /*_________________---------------------------__________________
     _________________    PSSpect sethdr         __________________
     -----------------___________________________------------------
   */
@@ -570,67 +725,6 @@ extern "C" {
   }
 
   /*_________________---------------------------__________________
-    _________________    socket reading         __________________
-    -----------------___________________________------------------
-  */
-
-  typedef void (*PSTReadCB)(PST *pst, int sock);
-
-  static void socketRead(PST *pst, uint32_t select_mS, PSTReadCB readCB) {
-    fd_set readfds;
-    FD_ZERO(&readfds);
-    sigset_t emptyset;
-    sigemptyset(&emptyset);
-    FD_SET(pst->nl_sock, &readfds);
-    int max_fd = pst->nl_sock;
-    struct timespec timeout;
-    timeout.tv_sec = 0;
-    timeout.tv_nsec = select_mS * 1000000;
-    int nfds = pselect(max_fd + 1,
-		       &readfds,
-		       (fd_set *)NULL,
-		       (fd_set *)NULL,
-		       &timeout,
-		       &emptyset);
-    // see if we got anything
-    if(nfds > 0) {
-      if(FD_ISSET(pst->nl_sock, &readfds))
-	(*readCB)(pst, pst->nl_sock);
-    }
-    else if(nfds < 0) {
-      // may return prematurely if a signal was caught, in which case nfds will be
-      // -1 and errno will be set to EINTR.  If we get any other error, abort.
-      if(errno != EINTR) {
-	myLog("pselect() returned %d : %s\n", nfds, strerror(errno));
-	abort();
-      }
-    }
-  }
-
-  /*_________________---------------------------__________________
-    _________________    PSSpec new             __________________
-    -----------------___________________________------------------
-  */
-
-  static PSSpec *PSSpec_new(PST *pst) {
-    return calloc(1, sizeof(PSSpec));
-  }
-
-  /*_________________---------------------------__________________
-    _________________    PSSpec free            __________________
-    -----------------___________________________------------------
-  */
-
-  static void PSSpec_free(PST *pst, PSSpec *spec) {
-    for(uint32_t ii = 0; ii < __PST_PSAMPLE_ATTR_MAX; ii++) {
-      PSAttr *psa = &spec->attr[ii];
-      if(psa->onheap)
-	free(psa->val.iov_base);
-    }
-    free(spec);
-  }
-
-  /*_________________---------------------------__________________
     _________________    PSSpec serialze        __________________
     -----------------___________________________------------------
   */
@@ -666,88 +760,6 @@ extern "C" {
   }
 
   /*_________________---------------------------__________________
-    _________________    PSSpec setAttr         __________________
-    -----------------___________________________------------------
-  */
-
-  static void setAttrValue(PSSpec *spec, EnumPSTAttributes type, void *val, int len) {
-    PSAttr *psa = &spec->attr[type];
-    assert(psa->included == NO); // make sure we don't set the same field twice
-    psa->included = YES;
-    psa->attr.nla_type = type;
-    psa->attr.nla_len = sizeof(psa->attr) + len;
-    int len_w_pad = NLMSG_ALIGN(len);
-    psa->val.iov_len = len_w_pad;
-    if(len_w_pad <= 8) {
-      psa->buf64 = 0;
-      psa->val.iov_base = &psa->buf64;
-    }
-    else {
-      psa->val.iov_base = calloc(1, len_w_pad);
-      psa->onheap = YES;
-    }
-    memcpy(psa->val.iov_base, val, len);
-    spec->n_attrs++;
-    spec->attrs_len += sizeof(psa->attr);
-    spec->attrs_len += len_w_pad;
-  }
-
-  static int PSSpec_setAttr(PST *pst, PSSpec *spec, EnumPSTAttributes type, char *vstr) {
-    switch(type) {
-    case PST_PSAMPLE_ATTR_IIFINDEX:
-    case PST_PSAMPLE_ATTR_OIFINDEX:
-    case PST_PSAMPLE_ATTR_ORIGSIZE:
-    case PST_PSAMPLE_ATTR_SAMPLE_GROUP:
-    case PST_PSAMPLE_ATTR_GROUP_SEQ:
-    case PST_PSAMPLE_ATTR_SAMPLE_RATE:
-      {
-	uint32_t val32 = atoi(vstr);
-	setAttrValue(spec, type, &val32, sizeof(val32));
-      }
-      break;
-
-    case PST_PSAMPLE_ATTR_DATA:
-      {
-	u_char buf[65536];
-	int len = hexToBinary((u_char *)vstr, buf, 65536);
-	setAttrValue(spec, type, buf, len);
-      }
-      break;
-
-    case PST_PSAMPLE_ATTR_TUNNEL:
-      // TODO:
-      break;
-
-    case PST_PSAMPLE_ATTR_GROUP_REFCOUNT:
-    case PST_PSAMPLE_ATTR_PAD:
-      // TODO:
-      break;
-
-    case PST_PSAMPLE_ATTR_OUT_TC:
-    case PST_PSAMPLE_ATTR_PROTO:
-      {
-	uint16_t val16 = atoi(vstr);
-	setAttrValue(spec, type, &val16, sizeof(val16));
-      }
-      // TODO: add 16-bit attr
-      break;
-
-    case PST_PSAMPLE_ATTR_OUT_TC_OCC:
-    case PST_PSAMPLE_ATTR_LATENCY:
-    case PST_PSAMPLE_ATTR_TIMESTAMP:
-      {
-	uint64_t val64 = strtoll(vstr, NULL, 0);
-	setAttrValue(spec, type, &val64, sizeof(val64));
-      }
-      break;
-    default:
-      myLog("bad attr type %d\n", type);
-      return 0;
-    }
-    return YES;
-  }
-
-  /*_________________---------------------------__________________
     _________________           main            __________________
     -----------------___________________________------------------
   */
@@ -762,7 +774,6 @@ extern "C" {
     // make sure psample kernel module is loaded
     int modprobe_status = system("modprobe psample");
     myLog("modprobe psample returned %d\n", modprobe_status);
-
 
     // open generic netlinke socket
     pst->id = 0;
@@ -782,55 +793,59 @@ extern "C" {
       exit(-1);
     }
 
-    // join multicast group TODO: is this necessary
+    // join multicast group. Is this strictly necessary
     // if we only want to send?
     joinGroup_PSAMPLE(pst);
-
-    // mod_psample in host-sflow expects egress to be
-    // on a psample group number that is 1 + the ingress
-    // group number.  (Note: these group numbers are
-    // attrbutes,  not to be confused with the multicast
-    // group number we are sending to.
-    //pst->psgrp_ingress = 1;
-    //pst->psgrp_egress =pst->psgrp_ingress + 1;
-    //send_test_msg(pst);
+    
+    // NOTE: mod_psample in host-sflow expects egress samples (if present)
+    // to be on a PSAMPLE_ATTR_SAMPLE_GROUP number that is 1 + the ingress
+    // group number. (These group number attrbutes are  not to be confused
+    // with the multicast group number we are sending to).
 
     PSSpec *sample = PSSpec_new(pst);
-    PSSpec_setAttr(pst, sample, PST_PSAMPLE_ATTR_SAMPLE_GROUP, "1");
-    PSSpec_setAttr(pst, sample, PST_PSAMPLE_ATTR_IIFINDEX, "7");
-    PSSpec_setAttr(pst, sample, PST_PSAMPLE_ATTR_OIFINDEX, "9");
-    PSSpec_setAttr(pst, sample, PST_PSAMPLE_ATTR_ORIGSIZE, "1514");
-    PSSpec_setAttr(pst, sample, PST_PSAMPLE_ATTR_GROUP_SEQ, "1");
-    PSSpec_setAttr(pst, sample, PST_PSAMPLE_ATTR_SAMPLE_RATE, "1000");
-    PSSpec_setAttr(pst, sample, PST_PSAMPLE_ATTR_DATA, "080009010203080009040506080045000000000000000000000000");
+    PSSpec_setAttr32(pst, sample, PST_PSAMPLE_ATTR_SAMPLE_GROUP, 1);
+    PSSpec_setAttr32(pst, sample, PST_PSAMPLE_ATTR_IIFINDEX, 7);
+    PSSpec_setAttr32(pst, sample, PST_PSAMPLE_ATTR_OIFINDEX, 9);
+    PSSpec_setAttr32(pst, sample, PST_PSAMPLE_ATTR_ORIGSIZE, 1514);
+    PSSpec_setAttr32(pst, sample, PST_PSAMPLE_ATTR_GROUP_SEQ, 1);
+    PSSpec_setAttr32(pst, sample, PST_PSAMPLE_ATTR_SAMPLE_RATE, 1000);
+
+#define PST_MAX_HDR_LEN 512
+    u_char buf[PST_MAX_HDR_LEN];
+    char *hexhdr =  "080009010203080009040506080045000000000000000000000000";
+    int len = hexToBinary(hexhdr, buf, PST_MAX_HDR_LEN);
+    PSSpec_setAttr(pst, sample, PST_PSAMPLE_ATTR_DATA, buf, len);
     // PST_PSAMPLE_ATTR_TUNNEL
     // PST_PSAMPLE_ATTR_GROUP_REFCOUNT,
     // PST_PSAMPLE_ATTR_PAD,
-    PSSpec_setAttr(pst, sample, PST_PSAMPLE_ATTR_OUT_TC, "3");
-    PSSpec_setAttr(pst, sample, PST_PSAMPLE_ATTR_OUT_TC_OCC, "33333333");
-    PSSpec_setAttr(pst, sample, PST_PSAMPLE_ATTR_LATENCY, "123456");
+    PSSpec_setAttr16(pst, sample, PST_PSAMPLE_ATTR_OUT_TC, 3);
+    PSSpec_setAttr64(pst, sample, PST_PSAMPLE_ATTR_OUT_TC_OCC, 33333333);
+    PSSpec_setAttr64(pst, sample, PST_PSAMPLE_ATTR_LATENCY, 123456);
     // PST_PSAMPLE_ATTR_TIMESTAMP,/* u64, nanoseconds */
-    PSSpec_setAttr(pst, sample, PST_PSAMPLE_ATTR_PROTO, "1"); // ethernet,  right?
+    // ATTR_PROTO==1 => SFLHEADER_ETHERNET_ISO8023
+    PSSpec_setAttr16(pst, sample, PST_PSAMPLE_ATTR_PROTO, 1);
 
     myLog("set headers...\n");
     PSSpec_sethdr(pst, sample);
 
+#ifdef PST_SHORT_CIRCUIT_TEST
     myLog("serialize...\n");
     struct nlmsghdr *msg = PSSpec_serialize(pst, sample);
-
     myLog("print before sending...\n");
     processNetlink_PSAMPLE(pst, msg);
+#endif
 
     myLog("send...\n");
     PSSpec_send(pst, sample);
-
     myLog("free...\n");
     PSSpec_free(pst, sample);
 
+#ifdef PST_LISTEN_MODE
     myLog("start read loop...\n");
     // read loop
     for(;;) {
       socketRead(pst, 500, readNetlink_PSAMPLE);
     }
+#endif
     return 0;
   }
