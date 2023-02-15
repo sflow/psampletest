@@ -1,4 +1,5 @@
-PROG=psampletest
+PROG=psampletest dropmontest
+OBJS= psampletest.o dropmontest.o
 HEADERS=
 
 # compiler
@@ -17,16 +18,19 @@ endif
 
 # CFLAGS and LIBS
 CFLAGS = $(OPT) -D_GNU_SOURCE
-CFLAGS += -Wall -Wstrict-prototypes -Wunused-value
-CFLAGS += -Wunused-function
+CFLAGS += -Wall -Wstrict-prototypes
+CFLAGS += -Wno-unused-but-set-variable
+CFLAGS += -Wno-unused-function
 LIBS=
 
-OBJS= $(PROG).o
 
-all: $(OBJS) $(PROG)
+all: $(PROG)
 
-psampletest: $(OBJS) $(HEADERS) Makefile
-	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LIBS)
+psampletest: psampletest.o $(HEADERS) Makefile
+	$(CC) $(CFLAGS) -o $@ psampletest.o $(LIBS)
+
+dropmontest: dropmontest.o $(HEADERS) Makefile
+	$(CC) $(CFLAGS) -o $@ dropmontest.o $(LIBS)
 
 #########  install  #########
 
@@ -40,5 +44,5 @@ clean:
 
 #########  dependencies  #########
 
-.c.o: $(HEADERS) Makefile
+.c.o:
 	$(CC) $(CFLAGS) -c $*.c
