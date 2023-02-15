@@ -948,37 +948,61 @@ extern "C" {
     // if we only want to send?
     joinGroup_DROPMON(dmt);
 
-    DMSpec *sample = DMSpec_new(dmt);
-    // nested:  DMSpec_setAttr32(dmt, sample, NET_DM_ATTR_IN_PORT, 7);
-    DMSpec_setAttr16(dmt, sample, NET_DM_ATTR_ORIGIN, 0);
-    DMSpec_setAttr64(dmt, sample, NET_DM_ATTR_PC, 0xffffffff00112233);
-
+    // compile fake packet header
 #define DMT_MAX_HDR_LEN 512
     u_char buf[DMT_MAX_HDR_LEN];
     char *hexhdr =  "080009010203080009040506080045000000000000000000000000";
     int len = hexToBinary(hexhdr, buf, DMT_MAX_HDR_LEN);
-    DMSpec_setAttr(dmt, sample, NET_DM_ATTR_PAYLOAD, buf, len);
-    char *sym = "dropmontest_symbol_attr";
-    DMSpec_setAttr(dmt, sample, NET_DM_ATTR_SYMBOL, sym, strlen(sym));
-    DMSpec_setAttr32(dmt, sample, NET_DM_ATTR_ORIG_LEN, 1400);
-    DMSpec_setAttr16(dmt, sample, NET_DM_ATTR_PROTO, 0x0800);
-
+    
+    // ========== simulate Software drop ================
+    DMSpec *sw_sample = DMSpec_new(dmt);
+    DMSpec_setAttr16(dmt, sw_sample, NET_DM_ATTR_ORIGIN, 0);
+    DMSpec_setAttr64(dmt, sw_sample, NET_DM_ATTR_PC, 0xffffffff00112233);
+    DMSpec_setAttr(dmt, sw_sample, NET_DM_ATTR_PAYLOAD, buf, len);
+    char *sym = "dropmontest_software";
+    DMSpec_setAttr(dmt, sw_sample, NET_DM_ATTR_SYMBOL, sym, strlen(sym));
+    DMSpec_setAttr32(dmt, sw_sample, NET_DM_ATTR_ORIG_LEN, 1400);
+    DMSpec_setAttr16(dmt, sw_sample, NET_DM_ATTR_PROTO, 0x0800);
     myLog("set headers...\n");
-    DMSpec_sethdr(dmt, sample);
-
+    DMSpec_sethdr(dmt, sw_sample);
 #ifdef DMT_SHORT_CIRCUIT_TEST
     myLog("serialize...\n");
-    struct nlmsghdr *msg = DMSpec_serialize(dmt, sample);
+    struct nlmsghdr *sw_msg = DMSpec_serialize(dmt, sw_sample);
     myLog("print before sending...\n");
-    processNetlink_DROPMON(dmt, msg);
+    processNetlink_DROPMON(dmt, sw_msg);
 #endif
-
     myLog("send...\n");
-    for(int rep=0; rep<10; rep++)
-      DMSpec_send(dmt, sample);
+    DMSpec_send(dmt, sw_sample);
     myLog("free...\n");
-    DMSpec_free(dmt, sample);
+    DMSpec_free(dmt, sw_sample);
 
+
+    // ========== simulate Hardware drop ================
+    DMSpec *hw_sample = DMSpec_new(dmt);
+    DMSpec_setAttr16(dmt, hw_sample, NET_DM_ATTR_ORIGIN, 0);
+    DMSpec_setAttr(dmt, hw_sample, NET_DM_ATTR_PAYLOAD, buf, len);
+    char *grp = "dropmontest_hw_grp";
+    char *evt = "dropmontest_hw_evt";
+    DMSpec_setAttr(dmt, hw_sample, NET_DM_ATTR_HW_TRAP_GROUP_NAME, grp, strlen(grp));
+    DMSpec_setAttr(dmt, hw_sample, NET_DM_ATTR_HW_TRAP_NAME, evt, strlen(evt));
+    DMSpec_setAttr32(dmt, hw_sample, NET_DM_ATTR_ORIG_LEN, 1400);
+    DMSpec_setAttr16(dmt, hw_sample, NET_DM_ATTR_PROTO, 0x0800);
+    myLog("set headers...\n");
+    DMSpec_sethdr(dmt, hw_sample);
+#ifdef DMT_SHORT_CIRCUIT_TEST
+    myLog("serialize...\n");
+    struct nlmsghdr *hw_msg = DMSpec_serialize(dmt, hw_sample);
+    myLog("print before sending...\n");
+    processNetlink_DROPMON(dmt, hw_msg);
+#endif
+    myLog("send...\n");
+    DMSpec_send(dmt, hw_sample);
+    myLog("free...\n");
+    DMSpec_free(dmt, hw_sample);
+
+    // TODO: read from file
+    // TODO: sent bursts of drops
+    
 #ifdef DMT_LISTEN_MODE
     myLog("start read loop...\n");
     // read loop
