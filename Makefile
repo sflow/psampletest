@@ -1,5 +1,5 @@
-PROG=psampletest dropmontest
-OBJS= psampletest.o dropmontest.o
+PROG=psampletest dropmontest diagtest
+OBJS= psampletest.o dropmontest.o diagtest.o
 HEADERS=
 
 # compiler
@@ -31,6 +31,9 @@ psampletest: psampletest.o $(HEADERS) Makefile
 
 dropmontest: dropmontest.o $(HEADERS) Makefile
 	$(CC) $(CFLAGS) -o $@ dropmontest.o $(LIBS)
+
+diagtest: diagtest.o $(HEADERS) Makefile
+	$(CC) $(CFLAGS) -o $@ diagtest.o $(LIBS)
 
 #########  install  #########
 
