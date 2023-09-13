@@ -738,7 +738,7 @@ extern "C" {
     char *addr_str = strtok(str, delim);
     char *port_str = strtok(NULL, delim);
     int portNum = atoi(port_str);
-    if(portNum > 0
+    if(portNum >= 0
        && portNum < 655356
        && parseNumericAddress(addr_str, NULL, addr, family)) {
       *p_port = portNum;
