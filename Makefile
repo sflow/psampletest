@@ -1,5 +1,5 @@
-PROG=psampletest dropmontest diagtest
-OBJS= psampletest.o dropmontest.o diagtest.o
+PROG=psampletest dropmontest diagtest ethtooltest
+OBJS= psampletest.o dropmontest.o diagtest.o ethtooltest.o
 HEADERS=
 
 # compiler
@@ -13,7 +13,7 @@ OPT_ALL= -O3 -DNDEBUG
 OPT_REG= -g -O2
 OPT_DBG= -g -ggdb
 ifndef OPT
-  OPT=$(OPT_REG)
+  OPT=$(OPT_DBG)
 endif
 
 # CFLAGS and LIBS
@@ -34,6 +34,9 @@ dropmontest: dropmontest.o $(HEADERS) Makefile
 
 diagtest: diagtest.o $(HEADERS) Makefile
 	$(CC) $(CFLAGS) -o $@ diagtest.o $(LIBS)
+
+ethtooltest: ethtooltest.o $(HEADERS) Makefile
+	$(CC) $(CFLAGS) -o $@ ethtooltest.o $(LIBS)
 
 #########  install  #########
 

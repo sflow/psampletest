@@ -700,15 +700,15 @@ extern "C" {
     // copy into inet_diag_sockid
     struct inet_diag_sockid *sockid = &ind->conn_req.id;
     // addresses
-    if(ipsrc->type == SFLADDRESSTYPE_IP_V4) {
-      ind->conn_req.sdiag_family = AF_INET;
-      memcpy(sockid->idiag_src, &ipsrc->address.ip_v4, 4);
-      memcpy(sockid->idiag_dst, &ipdst->address.ip_v4, 4);
-    }
-    else {
+    if(ipsrc->type == SFLADDRESSTYPE_IP_V6) {
       ind->conn_req.sdiag_family = AF_INET6;
       memcpy(sockid->idiag_src, &ipsrc->address.ip_v6, 16);
       memcpy(sockid->idiag_dst, &ipdst->address.ip_v6, 16);
+    }
+    else {
+      ind->conn_req.sdiag_family = AF_INET;
+      memcpy(sockid->idiag_src, &ipsrc->address.ip_v4, 4);
+      memcpy(sockid->idiag_dst, &ipdst->address.ip_v4, 4);
     }
     // L4 ports - network byte order
     sockid->idiag_sport = htons(sport);
