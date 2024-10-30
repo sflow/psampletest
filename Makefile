@@ -38,6 +38,15 @@ diagtest: diagtest.o $(HEADERS) Makefile
 ethtooltest: ethtooltest.o $(HEADERS) Makefile
 	$(CC) $(CFLAGS) -o $@ ethtooltest.o $(LIBS)
 
+usersocktest: usersocktest.o $(HEADERS) Makefile
+	$(CC) $(CFLAGS) -o $@ usersocktest.o $(LIBS)
+
+usersocktest_reader: usersocktest_reader.o Makefile
+	$(CC) $(CFLAGS) -o $@ usersocktest_reader.o $(LIBS)
+
+usersocktest_sender: usersocktest_sender.o Makefile
+	$(CC) $(CFLAGS) -o $@ usersocktest_sender.o $(LIBS)
+
 #########  install  #########
 
 install: all
