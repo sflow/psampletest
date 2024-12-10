@@ -262,11 +262,10 @@ extern "C" {
     -----------------___________________________------------------
   */
 
-  int UTNLGeneric_send(int sockfd, uint32_t mod_id, int type, int cmd, int req_type, void *req, int req_len, uint32_t seqNo) {
+  int UTNLGeneric_send(int sockfd, uint32_t mod_id, int type, int cmd, int req_type, void *req, int req_len, int req_footprint, uint32_t seqNo) {
     struct nlmsghdr nlh = { };
     struct genlmsghdr ge = { };
     struct nlattr attr = { };
-    int req_footprint = NLMSG_ALIGN(req_len);
 
     attr.nla_len = sizeof(attr) + req_len;
     attr.nla_type = req_type;
@@ -301,13 +300,16 @@ extern "C" {
   static void getFamily_PSAMPLE(PST *pst)
   {
     myLog("getFamily\n");
+#define PST_FAM_LEN sizeof(PSAMPLE_GENL_NAME)
+#define PST_FAM_FOOTPRINT NLMSG_ALIGN(PST_FAM_LEN)
+    char fam_name[PST_FAM_FOOTPRINT] = {};
+    memcpy(fam_name, PSAMPLE_GENL_NAME, PST_FAM_LEN);
     UTNLGeneric_send(pst->nl_sock,
 		     pst->id,
 		     GENL_ID_CTRL,
 		     CTRL_CMD_GETFAMILY,
 		     CTRL_ATTR_FAMILY_NAME,
-		     PSAMPLE_GENL_NAME,
-		     sizeof(PSAMPLE_GENL_NAME)+1,
+		     fam_name, PST_FAM_LEN, PST_FAM_FOOTPRINT,
 		     ++pst->nl_seq);
   }
 
